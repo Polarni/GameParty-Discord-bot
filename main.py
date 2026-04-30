@@ -4,8 +4,10 @@ from discord.ext import commands
 import os
 import sys
 import re
-import subprocess
+import io
+import zipfile
 import urllib.request
+import urllib.error
 import logging
 from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime
@@ -35,8 +37,15 @@ BOT_TOKEN  = os.getenv("BDAY_BOT_TOKEN") or os.getenv("BOT_TOKEN") \
 _guild_env  = os.getenv("GUILD_ID") \
               or _prompt_and_save("GUILD_ID", "Guild ID not set. Paste your Discord server ID: ")
 GUILD_ID    = int(_guild_env) if _guild_env else None
-GITHUB_REPO = os.getenv("GITHUB_REPO") \
-              or _prompt_and_save("GITHUB_REPO", "GitHub repo (username/repo-name): ")
+_github_env = os.getenv("GITHUB_REPO")
+if not _github_env:
+    _github_input = input("GitHub repo (username/repo-name, leave empty to skip): ").strip()
+    if _github_input:
+        with open(ENV_FILE, "a", encoding="utf-8") as f:
+            f.write(f"\nGITHUB_REPO={_github_input}\n")
+    GITHUB_REPO = _github_input
+else:
+    GITHUB_REPO = _github_env
 GIT_BRANCH  = "main"
 VERSION     = "0.1.1"
 
@@ -73,8 +82,10 @@ log = logging.getLogger(__name__)
 #  AUTO-UPDATE
 # ─────────────────────────────────────────────
 
+SKIP_ON_UPDATE = {".env", "config.json"}
+
 def check_for_updates() -> bool:
-    """Fetches main.py from GitHub, reads its VERSION, pulls if newer. Returns True if updated."""
+    """Downloads ZIP from GitHub if remote VERSION is newer. Returns True if updated."""
     if not GITHUB_REPO:
         return False
     try:
@@ -93,20 +104,33 @@ def check_for_updates() -> bool:
             log.info(f"Up to date (v{VERSION}).")
             return False
 
-        log.info(f"Update available: v{VERSION} -> v{remote_version}. Pulling...")
-        subprocess.run(
-            ["git", "pull", "origin", GIT_BRANCH],
-            check=True, capture_output=True, timeout=30, cwd=SCRIPT_DIR,
-        )
+        log.info(f"Update available: v{VERSION} -> v{remote_version}. Downloading...")
+        zip_url = f"https://github.com/{GITHUB_REPO}/archive/refs/heads/{GIT_BRANCH}.zip"
+        with urllib.request.urlopen(zip_url, timeout=30) as r:
+            zip_data = r.read()
+
+        with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
+            prefix = z.namelist()[0].split("/")[0] + "/"
+            for item in z.namelist():
+                relative = item[len(prefix):]
+                if not relative:
+                    continue
+                top = relative.split("/")[0]
+                if top in SKIP_ON_UPDATE:
+                    continue
+                target = os.path.join(SCRIPT_DIR, relative)
+                if item.endswith("/"):
+                    os.makedirs(target, exist_ok=True)
+                else:
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    with z.open(item) as src, open(target, "wb") as dst:
+                        dst.write(src.read())
+
         log.info(f"Updated to v{remote_version}.")
         return True
 
-    except FileNotFoundError:
-        log.warning("git not found — auto-update skipped.")
     except urllib.error.URLError as e:
         log.warning(f"GitHub unreachable: {e}")
-    except subprocess.CalledProcessError as e:
-        log.warning(f"git pull failed: {e.stderr.decode().strip() if e.stderr else e}")
     except Exception as e:
         log.warning(f"Auto-update error: {e}")
     return False

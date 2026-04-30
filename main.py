@@ -83,7 +83,7 @@ log = logging.getLogger(__name__)
 #  AUTO-UPDATE
 # ─────────────────────────────────────────────
 
-SKIP_ON_UPDATE = {".env", "config.json"}
+SKIP_ON_UPDATE = {".gitignore", ".gitattributes"}
 
 def check_for_updates() -> bool:
     """Downloads ZIP from GitHub if remote VERSION is newer. Returns True if updated."""

@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import commands
 import os
 import sys
+import subprocess
 import re
 import io
 import zipfile
@@ -179,9 +180,11 @@ bot.setup_hook = setup_hook_fn
 
 if check_for_updates():
     log.info("Restarting to apply update...")
-    os.execv(sys.executable, [sys.executable] + sys.argv)
+    subprocess.Popen([sys.executable] + sys.argv)
+    sys.exit(0)
 
 bot.run(BOT_TOKEN)
 
 if _restart:
-    os.execv(sys.executable, [sys.executable] + sys.argv)
+    subprocess.Popen([sys.executable] + sys.argv)
+    sys.exit(0)

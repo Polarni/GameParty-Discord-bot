@@ -212,13 +212,18 @@ async def restart_cmd(interaction: discord.Interaction):
 
 bot.setup_hook = setup_hook_fn
 
+def _do_restart():
+    if sys.platform == "win32":
+        subprocess.Popen([sys.executable] + sys.argv)
+        sys.exit(0)
+    else:
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
 if check_for_updates():
     log.info("Restarting to apply update...")
-    subprocess.Popen([sys.executable] + sys.argv)
-    sys.exit(0)
+    _do_restart()
 
 bot.run(BOT_TOKEN)
 
 if _restart:
-    subprocess.Popen([sys.executable] + sys.argv)
-    sys.exit(0)
+    _do_restart()

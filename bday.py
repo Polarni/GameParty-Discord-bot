@@ -41,8 +41,9 @@ LOCALES = load_locales()
 
 def t(lang: str, key: str, **kwargs) -> str:
     text = LOCALES.get(lang, {}).get(key)
-    if text is None:
-        log.warning(f"Missing translation: [{lang}] '{key}', falling back to '{DEFAULT_LANG}'.")
+    if not text:
+        if text is None:
+            log.warning(f"Missing translation: [{lang}] '{key}', falling back to '{DEFAULT_LANG}'.")
         text = LOCALES.get(DEFAULT_LANG, {}).get(key, key)
     return text.format(**kwargs) if kwargs else text
 
@@ -181,10 +182,10 @@ class BdayCog(commands.Cog):
         lang = detect_lang(interaction)
 
         if not (1 <= day <= 31):
-            await interaction.response.send_message(t(lang, "err_day"), ephemeral=True)
+            await interaction.response.send_message(f"❌ {t(lang, 'err_day')}", ephemeral=True)
             return
         if not (1 <= month <= 12):
-            await interaction.response.send_message(t(lang, "err_month"), ephemeral=True)
+            await interaction.response.send_message(f"❌ {t(lang, "err_month")}", ephemeral=True)
             return
 
         check_year = year or 2000
@@ -192,14 +193,14 @@ class BdayCog(commands.Cog):
             datetime.date(check_year, month, day)
         except ValueError:
             await interaction.response.send_message(
-                t(lang, "err_date", day=day, month=month, year=check_year), ephemeral=True
+                f"❌ {t(lang, 'err_date', day=day, month=month, year=check_year)}"
             )
             return
 
         if year is not None:
             if not (1900 <= year <= datetime.date.today().year):
                 await interaction.response.send_message(
-                    t(lang, "err_year", year=datetime.date.today().year), ephemeral=True
+                    f"❌ {t(lang, "err_year", year=datetime.date.today().year)}", ephemeral=True
                 )
                 return
 
@@ -214,7 +215,7 @@ class BdayCog(commands.Cog):
 
         year_str = f".{year}" if year else ""
         await interaction.response.send_message(
-            t(lang, "saved", date=f"{day}.{month}{year_str}"), ephemeral=True
+            f"✅ {t(lang, "saved", date=f"{day}.{month}{year_str}")}", ephemeral=True
         )
         log.info(f"Birthday saved for {interaction.user} ({user_id}) [{lang}]")
 
@@ -228,7 +229,7 @@ class BdayCog(commands.Cog):
         lang = detect_lang(interaction)
 
         if "day" not in users.get(user_id, {}):
-            await interaction.response.send_message(t(lang, "bday_not_found"), ephemeral=True)
+            await interaction.response.send_message(f"❌ {t(lang, "bday_not_found")}", ephemeral=True)
             return
 
         for key in BDAY_KEYS:
@@ -238,7 +239,7 @@ class BdayCog(commands.Cog):
             del users[user_id]
 
         save_users(users)
-        await interaction.response.send_message(t(lang, "bday_removed"), ephemeral=True)
+        await interaction.response.send_message(f"✅ {t(lang, "bday_removed")}", ephemeral=True)
         log.info(f"Birthday removed for {interaction.user} ({user_id}).")
 
     @app_commands.command(
@@ -261,7 +262,7 @@ class BdayCog(commands.Cog):
         save_config(cfg)
 
         await interaction.response.send_message(
-            t(lang, "channel_set", channel=target.mention), ephemeral=True
+            f"✅ {t(lang, "channel_set", channel=target.mention)}", ephemeral=True
         )
         log.info(f"Birthday channel set to #{target.name} ({target.id}) by {interaction.user}.")
 
@@ -295,9 +296,9 @@ class BdayCog(commands.Cog):
             lang = data.get("lang", DEFAULT_LANG)
             if data.get("year"):
                 age = today.year - data["year"]
-                message = t(lang, "bday_wish_age", mention=f"<@{user_id}>", age=age)
+                message = f"🎂 {t(lang, "bday_wish_age", mention=f"<@{user_id}>", age=age)} 🎉🎁"
             else:
-                message = t(lang, "bday_wish", mention=f"<@{user_id}>")
+                message = f"🎂 {t(lang, "bday_wish", mention=f"<@{user_id}>")} 🎉🎁"
 
             try:
                 await channel.send(message)

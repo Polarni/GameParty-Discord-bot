@@ -26,7 +26,7 @@ def _load_locales() -> dict:
 _LOCALES = _load_locales()
 
 def _t(lang: str, key: str, **kwargs) -> str:
-    text = _LOCALES.get(lang, _LOCALES.get(DEFAULT_LANG, {})).get(key, key)
+    text = _LOCALES.get(lang, {}).get(key) or _LOCALES.get(DEFAULT_LANG, {}).get(key, key)
     return text.format(**kwargs) if kwargs else text
 
 # ─────────────────────────────────────────────

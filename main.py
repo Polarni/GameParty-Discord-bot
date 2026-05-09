@@ -19,14 +19,19 @@ from dotenv import load_dotenv
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_FILE   = os.path.join(SCRIPT_DIR, ".env")
 load_dotenv(ENV_FILE)
-# místo příkazů interaktivní menu | místo reakcí tlačítka na role | zpráva zkouška sirén
+# místo příkazů interaktivní menu | místo reakcí tlačítka na role
 
 # ─────────────────────────────────────────────
 #  FIRST-RUN SETUP
 # ─────────────────────────────────────────────
 
+_INTERACTIVE = sys.stdin.isatty()
+
 def _prompt_and_save(key: str, prompt: str) -> str:
     """Ask for a missing .env value in the console and append it to .env."""
+    if not _INTERACTIVE:
+        print(f"ERROR: Required env variable '{key}' not set. Add it to .env.", file=sys.stderr)
+        sys.exit(1)
     value = input(prompt).strip()
     with open(ENV_FILE, "a", encoding="utf-8") as f:
         f.write(f"\n{key}={value}\n")
@@ -43,15 +48,18 @@ _guild_env  = os.getenv("GUILD_ID") \
 GUILD_ID    = int(_guild_env) if _guild_env else None
 _github_env = os.getenv("GITHUB_REPO")
 if not _github_env:
-    _github_input = input("GitHub repo (username/repo-name, leave empty to skip): ").strip()
-    if _github_input:
-        with open(ENV_FILE, "a", encoding="utf-8") as f:
-            f.write(f"\nGITHUB_REPO={_github_input}\n")
-    GITHUB_REPO = _github_input
+    if _INTERACTIVE:
+        _github_input = input("GitHub repo (username/repo-name, leave empty to skip): ").strip()
+        if _github_input:
+            with open(ENV_FILE, "a", encoding="utf-8") as f:
+                f.write(f"\nGITHUB_REPO={_github_input}\n")
+        GITHUB_REPO = _github_input
+    else:
+        GITHUB_REPO = ""
 else:
     GITHUB_REPO = _github_env
 GIT_BRANCH  = "main"
-VERSION     = "0.1.2"
+VERSION     = "0.2.0" #MAJOR . MINOR - new functions . PATCH - bugfix
 
 LOCALES_DIR = os.path.join(SCRIPT_DIR, "locales")
 
@@ -67,7 +75,7 @@ def _load_locales() -> dict:
 _LOCALES = _load_locales()
 
 def _t(lang: str, key: str) -> str:
-    return _LOCALES.get(lang, _LOCALES.get("en", {})).get(key, key)
+    return _LOCALES.get(lang, {}).get(key) or _LOCALES.get("en", {}).get(key, key)
 
 EXTENSIONS = [
     "lang",
@@ -75,6 +83,7 @@ EXTENSIONS = [
     "poll",
     "voice",
     "noti",
+    "games",
 ]
 
 # ─────────────────────────────────────────────
@@ -84,19 +93,78 @@ EXTENSIONS = [
 LOGS_DIR = os.path.join(SCRIPT_DIR, "logs")
 os.makedirs(LOGS_DIR, exist_ok=True)
 
+
+class _DailyFileHandler(TimedRotatingFileHandler):
+    # On midnight rollover: keep old file as-is, open a new file with today's date.
+    def doRollover(self):
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+        self.baseFilename = os.path.abspath(
+            os.path.join(LOGS_DIR, datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + ".log")
+        )
+        self.stream = self._open()
+        self.rolloverAt = self.computeRollover(int(datetime.now().timestamp()))
+
+
+_LEVEL_COLORS = {
+    logging.DEBUG:    "\x1b[36m",    # cyan
+    logging.INFO:     "\x1b[32m",    # green
+    logging.WARNING:  "\x1b[33m",    # yellow
+    logging.ERROR:    "\x1b[31m",    # red
+    logging.CRITICAL: "\x1b[31;1m",  # bright red
+}
+_RESET = "\x1b[0m"
+_DIM   = "\x1b[2m"
+
+
+def _enable_color() -> bool:
+    if not sys.stdout.isatty():
+        return False
+    try:
+        import ctypes
+        handle = ctypes.windll.kernel32.GetStdHandle(-11)  # type: ignore[attr-defined]
+        mode   = ctypes.c_ulong()
+        if ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)):  # type: ignore[attr-defined]
+            ctypes.windll.kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # type: ignore[attr-defined]
+            return True
+        return False
+    except AttributeError:
+        return True   # Linux/Mac — ctypes.windll doesn't exist, colors work natively
+    except Exception:
+        return False
+
+
+class _ColorFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        color   = _LEVEL_COLORS.get(record.levelno, "")
+        ts      = self.formatTime(record, self.datefmt)
+        level   = f"{color}{record.levelname:<8}{_RESET}"
+        module  = f"{_DIM}[{record.name[:5]:<5}]{_RESET}"
+        message = record.getMessage()
+        if record.exc_info:
+            message += "\n" + self.formatException(record.exc_info)
+        return f"{ts}  {level}  {module}  {message}"
+
+
 _start_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 _log_path   = os.path.join(LOGS_DIR, f"{_start_time}.log")
 
-_fmt = logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+_file_fmt = logging.Formatter(
+    "%(asctime)s  %(levelname)-8s  [%(name)-5s]  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 
-_file_handler = TimedRotatingFileHandler(_log_path, when="midnight", encoding="utf-8", backupCount=0)
-_file_handler.setFormatter(_fmt)
-_file_handler.namer = lambda _: os.path.join(LOGS_DIR, datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + ".log")
+_file_handler = _DailyFileHandler(_log_path, when="midnight", encoding="utf-8", backupCount=0)
+_file_handler.setFormatter(_file_fmt)
 
 _console_handler = logging.StreamHandler()
-_console_handler.setFormatter(_fmt)
+_console_handler.setFormatter(
+    _ColorFormatter(datefmt="%Y-%m-%d %H:%M:%S") if _enable_color() else _file_fmt
+)
 
 logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _console_handler])
+logging.getLogger("discord.http").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
@@ -164,7 +232,7 @@ _restart = False
 
 intents = discord.Intents.default()
 intents.members = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix=[], intents=intents, status=discord.Status.idle)
 
 
 @bot.event
@@ -203,7 +271,7 @@ async def info_cmd(interaction: discord.Interaction):
 async def restart_cmd(interaction: discord.Interaction):
     global _restart
     lang = detect_lang(interaction)
-    await interaction.response.send_message(_t(lang, "restarting"), ephemeral=True)
+    await interaction.response.send_message(f"🔄 {_t(lang, 'restarting')}", ephemeral=True)
     log.info(f"Restart triggered by {interaction.user}.")
     _restart = True
     await bot.change_presence(status=discord.Status.idle)
@@ -223,7 +291,7 @@ if check_for_updates():
     log.info("Restarting to apply update...")
     _do_restart()
 
-bot.run(BOT_TOKEN)
+bot.run(BOT_TOKEN, log_handler=None)
 
 if _restart:
     _do_restart()

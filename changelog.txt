@@ -1,27 +1,47 @@
-[0.1.2] — 2026-05-04
-# Přidáno
-## Automatická aktualizace bota při spuštění nebo po restartu
-## Nastavení role pro upozornění (YouTube a Twitch)
-## Editace stream zprávy, že již stream skončil a jak dlouho běžel
-## Informace o botovi pomocí příkazu
-## Rychlé restartování bota pomocí příkazu - při restartu status idle
-## Herní anketa s ukončením libovolným počtem dní do 16:00
+[0.2.0] — 2026-05-
+# Added
+## RSS news notifications (e.g. Steam Hardware)
+## Minigame Rock, Paper, Scissors /rps
+## Random number /roll
 
-# Opraveno
-## V anketách po nastavení role @everyone se zprávy od bota ukazovali jako @@everyone
-## Neukazují se náhledy YouTube Shorts
-## Mizející náhled streamu po ukončení streamu
-## Lokalizace pro upozornění streamů a videí
-## Špatné chování jazykové detekce klienta
+# Changed
+## Game polls have an option to suppress the role ping
+## Faster voice channel creation
+## Translations no longer contain emojis (symbols)
+## Changelog is now in English
+## Logging structure
+
+# Fixed
+## Script startup on Linux without initial configuration
+## Empty translation key value now triggers fallback
+## Fixed logs name
+## Stream & Video notifications will wait on Discord response
+## Bot not show status properly
+
+[0.1.2] — 2026-05-08
+# Added
+## Automatic bot update on startup or after restart
+## Role setting for notifications (YouTube and Twitch)
+## Stream message edited to show stream has ended and how long it ran
+## Bot information via slash command
+## Quick bot restart via slash command — status set to idle during restart
+## Game poll with configurable end time in N days at 16:00
+
+# Fixed
+## Polls mentioning @everyone role showed @@everyone in bot messages
+## YouTube Shorts previews no longer appear
+## Stream thumbnail disappearing after stream ends
+## Localization for stream and video notifications
+## Incorrect client language detection behavior
 
 [0.1.1] — 2026-04-27
-# Přidáno
-## Automatické hlasové kanály
-## Upozornění na nové video nebo živý stream
-## Lokalizace bota do jiných jazyků
+# Added
+## Automatic voice channels
+## Notifications for new videos and live streams
+## Bot localization into multiple languages
 
-[0.1.0] — 2026-04-5
-# Přidáno
-## Víkendové herní ankety
-## Narozeninová upozornění
-## Logování bota
+[0.1.0] — 2026-04-05
+# Added
+## Weekend game polls
+## Birthday notifications
+## Bot logging

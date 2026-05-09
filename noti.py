@@ -6,7 +6,9 @@ from lang import detect_lang
 import json
 import os
 import logging
+import re
 import time
+import xml.etree.ElementTree as ET
 import aiohttp
 
 SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
@@ -46,11 +48,12 @@ def save_config(data: dict) -> None:
 
 def load_noti() -> dict:
     if not os.path.exists(NOTI_FILE):
-        return {"youtube": {}, "twitch": {}}
+        return {"youtube": {}, "twitch": {}, "rss": {}}
     with open(NOTI_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
     data.setdefault("youtube", {})
     data.setdefault("twitch", {})
+    data.setdefault("rss", {})
     return data
 
 def save_noti(data: dict) -> None:
@@ -80,7 +83,7 @@ async def yt_resolve_channel(session: aiohttp.ClientSession, api_key: str, query
     else:
         params["forHandle"] = query if query.startswith("@") else f"@{query}"
 
-    log.info(f"YouTube API: channels lookup for {query!r}")
+    log.debug(f"YouTube API: channels lookup for {query!r}")
     async with session.get("https://www.googleapis.com/youtube/v3/channels", params=params) as r:
         if r.status != 200:
             log.warning(f"YouTube API: channels {r.status} for {query!r}")
@@ -98,7 +101,7 @@ async def yt_fetch_recent(
 ) -> list[tuple[str, str]]:
     uploads_id = "UU" + channel_id[2:]
     params = {"part": "snippet", "playlistId": uploads_id, "maxResults": max_results, "key": api_key}
-    log.info(f"YouTube API: playlistItems for {channel_id}")
+    log.debug(f"YouTube API: playlistItems for {channel_id}")
     async with session.get("https://www.googleapis.com/youtube/v3/playlistItems", params=params) as r:
         if r.status != 200:
             log.warning(f"YouTube API: playlistItems {r.status} for {channel_id}")
@@ -133,7 +136,7 @@ class TwitchClient:
         self._token: str | None = None
 
     async def _refresh(self, session: aiohttp.ClientSession) -> bool:
-        log.info("Twitch API: refreshing OAuth token")
+        log.debug("Twitch API: refreshing OAuth token")
         async with session.post(
             "https://id.twitch.tv/oauth2/token",
             params={
@@ -146,7 +149,7 @@ class TwitchClient:
                 log.warning(f"Twitch API: token refresh failed ({r.status})")
                 return False
             self._token = (await r.json()).get("access_token")
-            log.info("Twitch API: token refreshed")
+            log.debug("Twitch API: token refreshed")
             return bool(self._token)
 
     def _headers(self) -> dict:
@@ -155,7 +158,7 @@ class TwitchClient:
     async def _get(self, session: aiohttp.ClientSession, endpoint: str, params: dict) -> dict | None:
         if not self._token and not await self._refresh(session):
             return None
-        log.info(f"Twitch API: GET {endpoint} {params}")
+        log.debug(f"Twitch API: GET {endpoint} {params}")
         async with session.get(f"{self.BASE}/{endpoint}", params=params, headers=self._headers()) as r:
             if r.status == 401:
                 log.warning("Twitch API: 401, retrying after token refresh")
@@ -179,6 +182,82 @@ class TwitchClient:
         data  = await self._get(session, "streams", {"user_login": user_login})
         items = (data or {}).get("data", [])
         return items[0] if items else None
+
+# ─────────────────────────────────────────────
+#  RSS
+# ─────────────────────────────────────────────
+
+_MEDIA_NS = "http://search.yahoo.com/mrss/"
+
+def _strip_html(text: str) -> str:
+    text = re.sub(r"<(strong|b)>(.*?)</(strong|b)>", r"**\2**", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</(p|li|div|h\d)>", "\n\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    for ent, char in (
+        ("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"),
+        ("&gt;", ">"), ("&quot;", '"'), ("&#39;", "'"), ("&apos;", "'"),
+    ):
+        text = text.replace(ent, char)
+    text = "\n".join(line.strip() for line in text.splitlines())
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+def _parse_rss(xml_text: str) -> tuple[str, list[dict]]:
+    """Returns (feed_title, [items]) where each item is {guid, title, link, desc, image, pubdate}."""
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return "", []
+
+    # RSS 2.0
+    channel = root.find("channel")
+    if channel is not None:
+        feed_title = (channel.findtext("title") or "").strip()
+        items = []
+        for item in channel.findall("item"):
+            guid     = (item.findtext("guid") or item.findtext("link") or "").strip()
+            title    = (item.findtext("title") or "").strip()
+            link     = (item.findtext("link") or "").strip()
+            pubdate  = (item.findtext("pubDate") or "").strip()
+            desc_raw = item.findtext("description") or ""
+            desc     = _strip_html(desc_raw)
+            image    = None
+            enc = item.find("enclosure")
+            if enc is not None and "image" in (enc.get("type") or ""):
+                image = enc.get("url")
+            if not image:
+                for tag in (f"{{{_MEDIA_NS}}}thumbnail", f"{{{_MEDIA_NS}}}content"):
+                    el = item.find(tag)
+                    if el is not None:
+                        image = el.get("url")
+                        break
+            if not image:
+                m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', desc_raw)
+                if m:
+                    image = m.group(1)
+            items.append({"guid": guid, "title": title, "link": link, "desc": desc, "image": image, "pubdate": pubdate})
+        return feed_title, items
+
+    # Atom
+    ATOM = "http://www.w3.org/2005/Atom"
+    feed_title = (root.findtext(f"{{{ATOM}}}title") or "").strip()
+    items = []
+    for entry in root.findall(f"{{{ATOM}}}entry"):
+        guid     = (entry.findtext(f"{{{ATOM}}}id") or "").strip()
+        title    = (entry.findtext(f"{{{ATOM}}}title") or "").strip()
+        link_el  = entry.find(f"{{{ATOM}}}link")
+        link     = link_el.get("href", "") if link_el is not None else ""
+        pubdate  = (entry.findtext(f"{{{ATOM}}}updated") or entry.findtext(f"{{{ATOM}}}published") or "").strip()
+        desc_raw = entry.findtext(f"{{{ATOM}}}summary") or entry.findtext(f"{{{ATOM}}}content") or ""
+        desc     = _strip_html(desc_raw)
+        image    = None
+        for tag in (f"{{{_MEDIA_NS}}}thumbnail", f"{{{_MEDIA_NS}}}content"):
+            el = entry.find(tag)
+            if el is not None:
+                image = el.get("url")
+                break
+        items.append({"guid": guid, "title": title, "link": link, "desc": desc, "image": image, "pubdate": pubdate})
+    return feed_title, items
 
 # ─────────────────────────────────────────────
 #  HELPERS
@@ -216,7 +295,6 @@ def yt_video_embed(name: str, ch_id: str, video_id: str, title: str, thumb: str)
     return embed
 
 
-
 def twitch_embed(login: str, name: str, title: str, game: str, thumbnail_url: str, viewers: int) -> discord.Embed:
     url   = f"https://www.twitch.tv/{login}"
     embed = discord.Embed(title=title or "Untitled stream", url=url, color=0x9146FF)
@@ -244,6 +322,17 @@ def twitch_ended_embed(login: str, name: str, title: str, avatar_url: str | None
     embed.set_footer(text=footer)
     return embed
 
+
+def rss_embed(feed_name: str, title: str, link: str, desc: str, image: str | None, color: int = 0x2196F3) -> discord.Embed:
+    embed = discord.Embed(title=title, url=link or None, color=color)
+    embed.set_author(name=feed_name)
+    if desc:
+        embed.description = desc[:500] + ("…" if len(desc) > 500 else "")
+    if image:
+        embed.set_thumbnail(url=image)
+    embed.set_footer(text="News")
+    return embed
+
 # ─────────────────────────────────────────────
 #  COG
 # ─────────────────────────────────────────────
@@ -267,10 +356,12 @@ class NotiCog(commands.Cog):
             self.check_twitch.start()
         else:
             log.warning("TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET not set — Twitch notifications disabled.")
+        self.check_rss.start()
 
     async def cog_unload(self):
         self.check_youtube.cancel()
         self.check_twitch.cancel()
+        self.check_rss.cancel()
         if self._session:
             await self._session.close()
 
@@ -297,9 +388,10 @@ class NotiCog(commands.Cog):
             video_id, title, thumb = recent[0]
             if video_id != info.get("last_video_id"):
                 old = info.get("last_video_id")
-                info["last_video_id"] = video_id
-                changed = True
-                if old is not None:
+                if old is None:
+                    info["last_video_id"] = video_id
+                    changed = True
+                else:
                     channel = self.bot.get_channel(video_ch_id)
                     if channel:
                         try:
@@ -308,9 +400,14 @@ class NotiCog(commands.Cog):
                                 kwargs["content"] = _role_mention(yt_role_id, channel.guild)
                                 kwargs["allowed_mentions"] = discord.AllowedMentions(everyone=True, roles=True)
                             await channel.send(**kwargs)
+                            info["last_video_id"] = video_id
+                            changed = True
                             log.info(f"YT video notified: {title!r} ({ch_id})")
                         except Exception as e:
                             log.error(f"YT video send failed ({ch_id}): {e}")
+                    else:
+                        info["last_video_id"] = video_id
+                        changed = True
 
         if changed:
             save_noti_section("youtube", data["youtube"])
@@ -319,7 +416,7 @@ class NotiCog(commands.Cog):
     async def _before_youtube(self):
         await self.bot.wait_until_ready()
 
-    # ── Twitch poll (every 2 min) ─────────────
+    # ── Twitch poll (every 5 min) ─────────────
 
     @tasks.loop(minutes=5)
     async def check_twitch(self):
@@ -357,19 +454,18 @@ class NotiCog(commands.Cog):
                                 log.warning(f"Twitch thumb update failed ({login}): {e}")
                 continue
 
-            old_msg_id    = info.get("msg_id")
-            old_title     = info.get("stream_title", "")
-            old_started   = info.get("stream_started_at", "")
-            old_thumb     = info.get("stream_thumb", "")
-            info["stream_id"]         = stream_id
-            info["msg_id"]            = None
-            info["stream_title"]      = stream.get("title", "") if stream else old_title
-            info["stream_started_at"] = stream.get("started_at", "") if stream else ""
-            info["stream_thumb"]      = stream.get("thumbnail_url", "") if stream else info.get("stream_thumb", "")
-            changed = True
+            old_msg_id  = info.get("msg_id")
+            old_title   = info.get("stream_title", "")
+            old_started = info.get("stream_started_at", "")
 
             channel = self.bot.get_channel(stream_ch_id)
             if not channel:
+                info["stream_id"]         = stream_id
+                info["msg_id"]            = None
+                info["stream_title"]      = stream.get("title", "") if stream else old_title
+                info["stream_started_at"] = stream.get("started_at", "") if stream else ""
+                info["stream_thumb"]      = stream.get("thumbnail_url", "") if stream else info.get("stream_thumb", "")
+                changed = True
                 continue
 
             if stream:
@@ -388,7 +484,12 @@ class NotiCog(commands.Cog):
                         kwargs["content"] = _role_mention(tw_role_id, channel.guild)
                         kwargs["allowed_mentions"] = discord.AllowedMentions(everyone=True, roles=True)
                     msg = await channel.send(**kwargs)
-                    info["msg_id"] = msg.id
+                    info["stream_id"]         = stream_id
+                    info["msg_id"]            = msg.id
+                    info["stream_title"]      = stream.get("title", "")
+                    info["stream_started_at"] = stream.get("started_at", "")
+                    info["stream_thumb"]      = stream.get("thumbnail_url", "")
+                    changed = True
                     log.info(f"Twitch stream notified: {login}")
                 except Exception as e:
                     log.error(f"Twitch send failed ({login}): {e}")
@@ -400,15 +501,112 @@ class NotiCog(commands.Cog):
                         content=None,
                         embed=twitch_ended_embed(login, info["name"], old_title, info.get("avatar_url"), duration),
                     )
+                    info["stream_id"]         = stream_id
+                    info["msg_id"]            = None
+                    info["stream_title"]      = old_title
+                    info["stream_started_at"] = ""
+                    changed = True
                     log.info(f"Twitch stream ended: {login}")
                 except Exception as e:
                     log.error(f"Twitch edit failed ({login}): {e}")
+            else:
+                info["stream_id"]         = stream_id
+                info["msg_id"]            = None
+                info["stream_started_at"] = ""
+                changed = True
 
         if changed:
             save_noti_section("twitch", data["twitch"])
 
     @check_twitch.before_loop
     async def _before_twitch(self):
+        await self.bot.wait_until_ready()
+
+    # ── RSS poll (every 10 min) ───────────────
+
+    @tasks.loop(minutes=10)
+    async def check_rss(self):
+        cfg     = load_config()
+        ch_id   = cfg.get("noti_rss_channel_id")
+        role_id = cfg.get("noti_rss_role_id")
+        data    = load_noti()
+        changed = False
+
+        if not ch_id or not data["rss"]:
+            return
+
+        channel = self.bot.get_channel(ch_id)
+        if not channel:
+            return
+
+        for url, info in data["rss"].items():
+            try:
+                async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    if r.status != 200:
+                        log.warning(f"RSS fetch failed ({url}): HTTP {r.status}")
+                        continue
+                    xml_text = await r.text()
+            except Exception as e:
+                log.warning(f"RSS fetch error ({url}): {e}")
+                continue
+
+            _, items = _parse_rss(xml_text)
+            if not items:
+                continue
+
+            latest       = items[0]
+            guid_changed = latest["guid"]    != info.get("last_guid")
+            pub_changed  = latest["pubdate"] != info.get("last_pubdate") and latest["pubdate"]
+
+            if not guid_changed and not pub_changed:
+                continue
+
+            first_run = info.get("last_guid") is None
+
+            if first_run:
+                info["last_guid"]    = latest["guid"]
+                info["last_pubdate"] = latest["pubdate"]
+                changed = True
+                continue
+
+            if guid_changed:
+                info["msg_id"] = None
+
+            embed   = rss_embed(info["name"], latest["title"], latest["link"], latest["desc"], latest["image"], info.get("color", 0x2196F3))
+            sent_ok = False
+
+            if not guid_changed and info.get("msg_id"):
+                try:
+                    msg = await channel.fetch_message(info["msg_id"])
+                    await msg.edit(embed=embed)
+                    log.info(f"RSS news updated (edit): {latest['title']!r} ({url})")
+                    sent_ok = True
+                except Exception as e:
+                    log.warning(f"RSS edit failed, resending ({url}): {e}")
+
+            if not sent_ok:
+                try:
+                    kwargs = {"embed": embed}
+                    if role_id:
+                        kwargs["content"] = _role_mention(role_id, channel.guild)
+                        kwargs["allowed_mentions"] = discord.AllowedMentions(everyone=True, roles=True)
+                    msg = await channel.send(**kwargs)
+                    info["msg_id"] = msg.id
+                    sent_ok = True
+                    log.info(f"RSS news notified: {latest['title']!r} ({url})")
+                except Exception as e:
+                    log.error(f"RSS send failed ({url}): {e}")
+
+            if sent_ok:
+                info["last_guid"]    = latest["guid"]
+                info["last_pubdate"] = latest["pubdate"]
+                changed = True
+
+        if changed:
+            save_noti_section("rss", data["rss"])
+
+    @check_rss.before_loop
+    async def _before_rss(self):
         await self.bot.wait_until_ready()
 
     # ── Commands ──────────────────────────────
@@ -420,7 +618,7 @@ class NotiCog(commands.Cog):
         cfg = load_config()
         cfg["noti_video_channel_id"] = channel.id
         save_config(cfg)
-        await interaction.response.send_message(t(detect_lang(interaction), "noti_video_set", channel=channel.mention), ephemeral=True)
+        await interaction.response.send_message(f"✅ {t(detect_lang(interaction), 'noti_video_set', channel=channel.mention)}", ephemeral=True)
         log.info(f"Noti video channel set to #{channel.name} ({channel.id}) by {interaction.user}.")
 
     @app_commands.command(name="noti-stream", description=app_commands.locale_str("Set the Discord channel for all stream notifications", key="cmd_noti_stream"))
@@ -430,8 +628,18 @@ class NotiCog(commands.Cog):
         cfg = load_config()
         cfg["noti_stream_channel_id"] = channel.id
         save_config(cfg)
-        await interaction.response.send_message(t(detect_lang(interaction), "noti_stream_set", channel=channel.mention), ephemeral=True)
+        await interaction.response.send_message(f"✅ {t(detect_lang(interaction), 'noti_stream_set', channel=channel.mention)}", ephemeral=True)
         log.info(f"Noti stream channel set to #{channel.name} ({channel.id}) by {interaction.user}.")
+
+    @app_commands.command(name="noti-rss-channel", description=app_commands.locale_str("Set the channel for RSS news notifications", key="cmd_noti_rss_channel"))
+    @app_commands.describe(channel=app_commands.locale_str("Channel to post RSS notifications in", key="cmd_noti_rss_channel_param"))
+    @app_commands.default_permissions(administrator=True)
+    async def noti_rss_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        cfg = load_config()
+        cfg["noti_rss_channel_id"] = channel.id
+        save_config(cfg)
+        await interaction.response.send_message(t(detect_lang(interaction), "noti_rss_channel_set", channel=channel.mention), ephemeral=True)
+        log.info(f"Noti RSS channel set to #{channel.name} ({channel.id}) by {interaction.user}.")
 
     @app_commands.command(name="noti-youtube-role", description=app_commands.locale_str("Set the role to mention for YouTube notifications", key="cmd_noti_youtube_role"))
     @app_commands.describe(role=app_commands.locale_str("Role to mention for YouTube videos and streams", key="cmd_noti_youtube_role_param"))
@@ -441,7 +649,7 @@ class NotiCog(commands.Cog):
         cfg["noti_youtube_role_id"] = role.id
         save_config(cfg)
         mention = "@everyone" if role.is_default() else role.mention
-        await interaction.response.send_message(t(detect_lang(interaction), "noti_youtube_role_set", role=mention), ephemeral=True)
+        await interaction.response.send_message(f"✅ {t(detect_lang(interaction), 'noti_youtube_role_set', role=mention)}", ephemeral=True)
         log.info(f"Noti YouTube role set to {role.name} ({role.id}) by {interaction.user}.")
 
     @app_commands.command(name="noti-twitch-role", description=app_commands.locale_str("Set the role to mention for Twitch notifications", key="cmd_noti_twitch_role"))
@@ -452,8 +660,19 @@ class NotiCog(commands.Cog):
         cfg["noti_twitch_role_id"] = role.id
         save_config(cfg)
         mention = "@everyone" if role.is_default() else role.mention
-        await interaction.response.send_message(t(detect_lang(interaction), "noti_twitch_role_set", role=mention), ephemeral=True)
+        await interaction.response.send_message(f"✅ {t(detect_lang(interaction), 'noti_twitch_role_set', role=mention)}", ephemeral=True)
         log.info(f"Noti Twitch role set to {role.name} ({role.id}) by {interaction.user}.")
+
+    @app_commands.command(name="noti-rss-role", description=app_commands.locale_str("Set the role to mention for RSS notifications", key="cmd_noti_rss_role"))
+    @app_commands.describe(role=app_commands.locale_str("Role to mention for RSS news", key="cmd_noti_rss_role_param"))
+    @app_commands.default_permissions(administrator=True)
+    async def noti_rss_role(self, interaction: discord.Interaction, role: discord.Role):
+        cfg = load_config()
+        cfg["noti_rss_role_id"] = role.id
+        save_config(cfg)
+        mention = "@everyone" if role.is_default() else role.mention
+        await interaction.response.send_message(t(detect_lang(interaction), "noti_rss_role_set", role=mention), ephemeral=True)
+        log.info(f"Noti RSS role set to {role.name} ({role.id}) by {interaction.user}.")
 
     @app_commands.command(name="noti-youtube-add", description=app_commands.locale_str("Add a YouTube channel to monitor", key="cmd_noti_youtube_add"))
     @app_commands.describe(channel=app_commands.locale_str("YouTube channel URL, @handle, or channel ID (UCxxxxxx)", key="cmd_noti_youtube_add_channel"))
@@ -461,14 +680,14 @@ class NotiCog(commands.Cog):
     async def noti_youtube_add(self, interaction: discord.Interaction, channel: str):
         lang = detect_lang(interaction)
         if not self._yt_key:
-            await interaction.response.send_message(t(lang, "noti_err_no_yt_key"), ephemeral=True)
+            await interaction.response.send_message(f"❌ {t(lang, 'noti_err_no_yt_key')}", ephemeral=True)
             return
 
         await interaction.response.defer(ephemeral=True)
 
         resolved = await yt_resolve_channel(self._session, self._yt_key, channel)
         if not resolved:
-            await interaction.followup.send(t(lang, "noti_err_yt_not_found"))
+            await interaction.followup.send(f"❌ {t(lang, 'noti_err_yt_not_found')}")
             return
 
         ch_id, name = resolved
@@ -501,7 +720,7 @@ class NotiCog(commands.Cog):
                 except Exception as e:
                     log.error(f"YT latest video send failed ({ch_id}): {e}")
 
-        await interaction.followup.send(t(lang, "noti_added", name=name))
+        await interaction.followup.send(f"✅ {t(lang, 'noti_added', name=name)}")
         log.info(f"YT channel added: {name} ({ch_id}) by {interaction.user}.")
 
     @app_commands.command(name="noti-twitch-add", description=app_commands.locale_str("Add a Twitch streamer to monitor", key="cmd_noti_twitch_add"))
@@ -510,7 +729,7 @@ class NotiCog(commands.Cog):
     async def noti_twitch_add(self, interaction: discord.Interaction, username: str):
         lang = detect_lang(interaction)
         if not self._twitch:
-            await interaction.response.send_message(t(lang, "noti_err_no_twitch"), ephemeral=True)
+            await interaction.response.send_message(f"❌ {t(lang, 'noti_err_no_twitch')}", ephemeral=True)
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -518,7 +737,7 @@ class NotiCog(commands.Cog):
         login = username.lstrip("@").lower()
         user  = await self._twitch.get_user(self._session, login)
         if not user:
-            await interaction.followup.send(t(lang, "noti_err_twitch_not_found", login=login))
+            await interaction.followup.send(f"❌ {t(lang, 'noti_err_twitch_not_found', login=login)}")
             return
 
         data     = load_noti()
@@ -564,8 +783,69 @@ class NotiCog(commands.Cog):
                 except Exception as e:
                     log.error(f"Twitch live send on add failed ({login}): {e}")
 
-        await interaction.followup.send(t(lang, "noti_added", name=user["display_name"]))
+        await interaction.followup.send(f"✅ {t(lang, 'noti_added', name=user['display_name'])}")
         log.info(f"Twitch added: {user['display_name']} ({login}) by {interaction.user}.")
+
+    @app_commands.command(name="noti-rss-add", description=app_commands.locale_str("Add an RSS feed to monitor", key="cmd_noti_rss_add"))
+    @app_commands.describe(
+        url=app_commands.locale_str("RSS feed URL", key="cmd_noti_rss_add_url"),
+        name=app_commands.locale_str("Display name (leave empty to use feed title)", key="cmd_noti_rss_add_name"),
+        color=app_commands.locale_str("Embed color as hex (e.g. 1B2838), default: 2196F3", key="cmd_noti_rss_add_color"),
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def noti_rss_add(self, interaction: discord.Interaction, url: str, name: str | None = None, color: str | None = None):
+        lang = detect_lang(interaction)
+        await interaction.response.defer(ephemeral=True)
+
+        embed_color = 0x2196F3
+        if color:
+            try:
+                embed_color = int(color.lstrip("#"), 16)
+            except ValueError:
+                await interaction.followup.send(t(lang, "noti_err_rss_color"))
+                return
+
+        try:
+            async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status != 200:
+                    await interaction.followup.send(t(lang, "noti_err_rss_invalid"))
+                    return
+                xml_text = await r.text()
+        except Exception:
+            await interaction.followup.send(t(lang, "noti_err_rss_invalid"))
+            return
+
+        feed_title, items = _parse_rss(xml_text)
+        if not items:
+            await interaction.followup.send(t(lang, "noti_err_rss_invalid"))
+            return
+
+        feed_name = name or feed_title or url
+        latest    = items[0]
+
+        data = load_noti()
+        data["rss"][url] = {"name": feed_name, "last_guid": latest["guid"], "last_pubdate": latest["pubdate"], "color": embed_color, "msg_id": None}
+        save_noti(data)
+
+        cfg     = load_config()
+        ch_id   = cfg.get("noti_rss_channel_id")
+        role_id = cfg.get("noti_rss_role_id")
+        ch = self.bot.get_channel(ch_id) if ch_id else None
+        if ch:
+            try:
+                kwargs = {"embed": rss_embed(feed_name, latest["title"], latest["link"], latest["desc"], latest["image"], embed_color)}
+                if role_id:
+                    kwargs["content"] = _role_mention(role_id, ch.guild)
+                    kwargs["allowed_mentions"] = discord.AllowedMentions(everyone=True, roles=True)
+                msg = await ch.send(**kwargs)
+                data["rss"][url]["msg_id"] = msg.id
+                save_noti_section("rss", data["rss"])
+                log.info(f"RSS latest item sent for {feed_name} ({url}).")
+            except Exception as e:
+                log.error(f"RSS latest send failed ({url}): {e}")
+
+        await interaction.followup.send(f"✅ {t(lang, 'noti_added', name=feed_name)}")
+        log.info(f"RSS feed added: {feed_name} ({url}) by {interaction.user}.")
 
     @app_commands.command(name="noti-youtube-remove", description=app_commands.locale_str("Remove a monitored YouTube channel", key="cmd_noti_youtube_remove"))
     @app_commands.describe(channel=app_commands.locale_str("YouTube channel (start typing to search)", key="cmd_noti_youtube_remove_ch"))
@@ -575,10 +855,10 @@ class NotiCog(commands.Cog):
         data = load_noti()
         info = data["youtube"].pop(channel, None)
         if not info:
-            await interaction.response.send_message(t(lang, "noti_err_yt_not_in_list"), ephemeral=True)
+            await interaction.response.send_message(f"❌ {t(lang, 'noti_err_yt_not_in_list')}", ephemeral=True)
             return
         save_noti(data)
-        await interaction.response.send_message(t(lang, "noti_removed", name=info["name"]), ephemeral=True)
+        await interaction.response.send_message(f"✅ {t(lang, 'noti_removed', name=info['name'])}", ephemeral=True)
         log.info(f"YT channel removed: {info['name']} ({channel}) by {interaction.user}.")
 
     @noti_youtube_remove.autocomplete("channel")
@@ -598,10 +878,10 @@ class NotiCog(commands.Cog):
         data = load_noti()
         info = data["twitch"].pop(username, None)
         if not info:
-            await interaction.response.send_message(t(lang, "noti_err_twitch_not_in_list"), ephemeral=True)
+            await interaction.response.send_message(f"❌ {t(lang, 'noti_err_twitch_not_in_list')}", ephemeral=True)
             return
         save_noti(data)
-        await interaction.response.send_message(t(lang, "noti_removed", name=info["name"]), ephemeral=True)
+        await interaction.response.send_message(f"✅ {t(lang, 'noti_removed', name=info['name'])}", ephemeral=True)
         log.info(f"Twitch removed: {info['name']} ({username}) by {interaction.user}.")
 
     @noti_twitch_remove.autocomplete("username")
@@ -613,6 +893,29 @@ class NotiCog(commands.Cog):
             if current.lower() in info["name"].lower() or current.lower() in login
         ][:25]
 
+    @app_commands.command(name="noti-rss-remove", description=app_commands.locale_str("Remove a monitored RSS feed", key="cmd_noti_rss_remove"))
+    @app_commands.describe(feed=app_commands.locale_str("RSS feed (start typing to search)", key="cmd_noti_rss_remove_feed"))
+    @app_commands.default_permissions(administrator=True)
+    async def noti_rss_remove(self, interaction: discord.Interaction, feed: str):
+        lang = detect_lang(interaction)
+        data = load_noti()
+        info = data["rss"].pop(feed, None)
+        if not info:
+            await interaction.response.send_message(t(lang, "noti_err_rss_not_in_list"), ephemeral=True)
+            return
+        save_noti(data)
+        await interaction.response.send_message(f"✅ {t(lang, 'noti_removed', name=info['name'])}", ephemeral=True)
+        log.info(f"RSS feed removed: {info['name']} ({feed}) by {interaction.user}.")
+
+    @noti_rss_remove.autocomplete("feed")
+    async def _rss_remove_ac(self, _: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        data = load_noti()
+        return [
+            app_commands.Choice(name=info["name"], value=url)
+            for url, info in data["rss"].items()
+            if current.lower() in info["name"].lower() or current.lower() in url.lower()
+        ][:25]
+
     @app_commands.command(name="noti-list", description=app_commands.locale_str("List all monitored YouTube channels and Twitch streamers", key="cmd_noti_list"))
     @app_commands.default_permissions(administrator=True)
     async def noti_list(self, interaction: discord.Interaction):
@@ -622,19 +925,25 @@ class NotiCog(commands.Cog):
 
         video_ch  = f"<#{cfg['noti_video_channel_id']}>"  if cfg.get("noti_video_channel_id")  else "—"
         stream_ch = f"<#{cfg['noti_stream_channel_id']}>" if cfg.get("noti_stream_channel_id") else "—"
+        rss_ch    = f"<#{cfg['noti_rss_channel_id']}>"    if cfg.get("noti_rss_channel_id")    else "—"
         yt_role   = f"<@&{cfg['noti_youtube_role_id']}>"  if cfg.get("noti_youtube_role_id")   else "—"
         tw_role   = f"<@&{cfg['noti_twitch_role_id']}>"   if cfg.get("noti_twitch_role_id")    else "—"
+        rss_role  = f"<@&{cfg['noti_rss_role_id']}>"      if cfg.get("noti_rss_role_id")       else "—"
 
-        yt_lines = [f"**{info['name']}** `{ch_id}`" for ch_id, info in data["youtube"].items()]
-        tw_lines = [f"**{info['name']}** `{login}`"  for login, info in data["twitch"].items()]
+        yt_lines  = [f"**{info['name']}** `{ch_id}`" for ch_id, info in data["youtube"].items()]
+        tw_lines  = [f"**{info['name']}** `{login}`" for login, info in data["twitch"].items()]
+        rss_lines = [f"**{info['name']}** `{url}`"   for url,   info in data["rss"].items()]
 
         embed = discord.Embed(title=t(lang, "noti_list_title"), color=discord.Color.blurple())
         embed.add_field(name=t(lang, "noti_list_video_ch"),  value=video_ch,  inline=True)
         embed.add_field(name=t(lang, "noti_list_stream_ch"), value=stream_ch, inline=True)
+        embed.add_field(name=t(lang, "noti_list_rss_ch"),    value=rss_ch,    inline=True)
         embed.add_field(name=t(lang, "noti_list_yt_role"),   value=yt_role,   inline=True)
         embed.add_field(name=t(lang, "noti_list_tw_role"),   value=tw_role,   inline=True)
-        embed.add_field(name=t(lang, "noti_list_youtube", count=len(yt_lines)), value="\n".join(yt_lines) or "—", inline=False)
-        embed.add_field(name=t(lang, "noti_list_twitch",  count=len(tw_lines)), value="\n".join(tw_lines)  or "—", inline=False)
+        embed.add_field(name=t(lang, "noti_list_rss_role"),  value=rss_role,  inline=True)
+        embed.add_field(name=t(lang, "noti_list_youtube", count=len(yt_lines)),  value="\n".join(yt_lines)  or "—", inline=False)
+        embed.add_field(name=t(lang, "noti_list_twitch",  count=len(tw_lines)),  value="\n".join(tw_lines)  or "—", inline=False)
+        embed.add_field(name=t(lang, "noti_list_rss",     count=len(rss_lines)), value="\n".join(rss_lines) or "—", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 

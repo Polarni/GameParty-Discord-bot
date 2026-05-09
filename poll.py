@@ -78,7 +78,7 @@ LOCALES = load_locales()
 
 
 def t(lang: str, key: str, **kwargs) -> str:
-    text = LOCALES.get(lang, LOCALES.get("en", {})).get(key, key)
+    text = LOCALES.get(lang, {}).get(key) or LOCALES.get("en", {}).get(key, key)
     return text.format(**kwargs) if kwargs else text
 
 
@@ -183,7 +183,7 @@ class ConfirmView(discord.ui.View):
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red, emoji="❌")
     async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button):
-        await interaction.response.edit_message(content=t(self.lang, "cancelled"), view=None)
+        await interaction.response.edit_message(content=f"❌ {t(self.lang, 'cancelled')}", view=None)
         self.stop()
 
 # ─────────────────────────────────────────────
@@ -199,12 +199,13 @@ class PollCog(commands.Cog):
         self.noti_role_id    = cfg.get("poll_noti_role_id")
 
     @app_commands.command(name="poll", description=app_commands.locale_str("Send weekend game polls", key="cmd_poll"))
+    @app_commands.describe(ping=app_commands.locale_str("Mention the role (default: True)", key="cmd_poll_ping"))
     @app_commands.default_permissions(administrator=True)
-    async def poll(self, interaction: discord.Interaction):
+    async def poll(self, interaction: discord.Interaction, ping: bool = True):
         lang = detect_lang(interaction)
         channel = self.bot.get_channel(self.poll_channel_id)
         if channel is None:
-            await interaction.response.send_message(t(lang, "err_poll_no_channel"), ephemeral=True)
+            await interaction.response.send_message(f"❌ {t(lang, 'err_poll_no_channel')}", ephemeral=True)
             return
 
         view = ConfirmView(lang)
@@ -215,13 +216,13 @@ class PollCog(commands.Cog):
         if not view.confirmed:
             return
 
-        await interaction.edit_original_response(content=t(lang, "poll_sending"), view=None)
+        await interaction.edit_original_response(content=f"⏳ {t(lang, 'poll_sending')}", view=None)
 
         title, utc_offset, end_time = next_weekend()
         hours = max(1, round((end_time - datetime.datetime.now()).total_seconds() / 3600))
 
         await delete_old_messages(channel, self.bot.user.id)
-        if self.role_id:
+        if ping and self.role_id:
             if self.role_id == channel.guild.id:
                 await channel.send("@everyone", allowed_mentions=discord.AllowedMentions(everyone=True))
             else:
@@ -241,7 +242,7 @@ class PollCog(commands.Cog):
             name=f"💬 Chat - {title}",
             auto_archive_duration=4320,
         )
-        if self.noti_role_id:
+        if ping and self.noti_role_id:
             if self.noti_role_id == channel.guild.id:
                 ping = await thread.send("@everyone", allowed_mentions=discord.AllowedMentions(everyone=True))
             else:
@@ -268,16 +269,19 @@ class PollCog(commands.Cog):
             log.info(f"Poll sent: '{p['question']}' (ID: {msg.id})")
 
         log.info(f"All polls sent. Running for {hours} hours.")
-        await interaction.edit_original_response(content=t(lang, "poll_sent"))
+        await interaction.edit_original_response(content=f"✅ {t(lang, 'poll_sent')}")
 
     @app_commands.command(name="poll-day", description=app_commands.locale_str("Send game polls until 16:00 in N days", key="cmd_poll_day"))
-    @app_commands.describe(days=app_commands.locale_str("Number of days until the poll closes at 16:00", key="cmd_poll_day_days"))
+    @app_commands.describe(
+        days=app_commands.locale_str("Number of days until the poll closes at 16:00", key="cmd_poll_day_days"),
+        ping=app_commands.locale_str("Mention the role (default: True)", key="cmd_poll_ping"),
+    )
     @app_commands.default_permissions(administrator=True)
-    async def poll_day(self, interaction: discord.Interaction, days: int):
+    async def poll_day(self, interaction: discord.Interaction, days: int, ping: bool = True):
         lang = detect_lang(interaction)
         channel = self.bot.get_channel(self.poll_channel_id)
         if channel is None:
-            await interaction.response.send_message(t(lang, "err_poll_no_channel"), ephemeral=True)
+            await interaction.response.send_message(f"❌ {t(lang, 'err_poll_no_channel')}", ephemeral=True)
             return
 
         view = ConfirmView(lang)
@@ -288,12 +292,12 @@ class PollCog(commands.Cog):
         if not view.confirmed:
             return
 
-        await interaction.edit_original_response(content=t(lang, "poll_sending"), view=None)
+        await interaction.edit_original_response(content=f"⏳ {t(lang, 'poll_sending')}", view=None)
 
         title, hours = next_day_16(days)
 
         await delete_old_messages(channel, self.bot.user.id)
-        if self.role_id:
+        if ping and self.role_id:
             if self.role_id == channel.guild.id:
                 await channel.send("@everyone", allowed_mentions=discord.AllowedMentions(everyone=True))
             else:
@@ -313,7 +317,7 @@ class PollCog(commands.Cog):
             name=f"💬 Chat - {title}",
             auto_archive_duration=4320,
         )
-        if self.noti_role_id:
+        if ping and self.noti_role_id:
             if self.noti_role_id == channel.guild.id:
                 ping = await thread.send("@everyone", allowed_mentions=discord.AllowedMentions(everyone=True))
             else:
@@ -339,7 +343,7 @@ class PollCog(commands.Cog):
             log.info(f"Poll sent: '{p['question']}' (ID: {msg.id})")
 
         log.info(f"Day polls sent. Running for {hours} hours (until {title} 16:00).")
-        await interaction.edit_original_response(content=t(lang, "poll_sent"))
+        await interaction.edit_original_response(content=f"✅ {t(lang, 'poll_sent')}")
 
     @app_commands.command(name="poll-end", description=app_commands.locale_str("End all active polls in the poll channel", key="cmd_poll_end"))
     @app_commands.default_permissions(administrator=True)
@@ -347,7 +351,7 @@ class PollCog(commands.Cog):
         lang = detect_lang(interaction)
         channel = self.bot.get_channel(self.poll_channel_id)
         if channel is None:
-            await interaction.response.send_message(t(lang, "err_poll_no_channel"), ephemeral=True)
+            await interaction.response.send_message(f"❌ {t(lang, 'err_poll_no_channel')}", ephemeral=True)
             return
 
         view = ConfirmView(lang)
@@ -358,7 +362,7 @@ class PollCog(commands.Cog):
         if not view.confirmed:
             return
 
-        await interaction.edit_original_response(content=t(lang, "poll_ending"), view=None)
+        await interaction.edit_original_response(content=f"⏳ {t(lang, 'poll_ending')}", view=None)
 
         ended = 0
         skipped = 0
@@ -376,7 +380,7 @@ class PollCog(commands.Cog):
                 log.error(f"Could not end poll '{msg.poll.question}': {e}")
 
         log.info(f"Done. Ended: {ended}, skipped: {skipped}.")
-        await interaction.edit_original_response(content=t(lang, "poll_ended", ended=ended, skipped=skipped))
+        await interaction.edit_original_response(content=f"✅ {t(lang, 'poll_ended', ended=ended, skipped=skipped)}")
 
     @app_commands.command(name="poll-set", description=app_commands.locale_str("Set the poll channel", key="cmd_poll_set"))
     @app_commands.describe(channel=app_commands.locale_str("Channel to use (leave empty for current channel)", key="cmd_poll_set_channel"))
@@ -390,7 +394,7 @@ class PollCog(commands.Cog):
         save_config(cfg)
 
         await interaction.response.send_message(
-            t(lang, "poll_channel_set", channel=target.mention), ephemeral=True
+            f"✅ {t(lang, 'poll_channel_set', channel=target.mention)}", ephemeral=True
         )
         log.info(f"Poll channel set to #{target.name} ({target.id}) by {interaction.user}.")
 
@@ -405,7 +409,7 @@ class PollCog(commands.Cog):
         save_config(cfg)
 
         await interaction.response.send_message(
-            t(lang, "poll_role_set", role=role_mention(role)), ephemeral=True
+            f"✅ {t(lang, 'poll_role_set', role=role_mention(role))}", ephemeral=True
         )
         log.info(f"Poll role set to {role.name} ({role.id}) by {interaction.user}.")
 
@@ -420,7 +424,7 @@ class PollCog(commands.Cog):
         save_config(cfg)
 
         await interaction.response.send_message(
-            t(lang, "poll_noti_set", role=role_mention(role)), ephemeral=True
+            f"✅ {t(lang, 'poll_noti_set', role=role_mention(role))}", ephemeral=True
         )
         log.info(f"Poll noti role set to {role.name} ({role.id}) by {interaction.user}.")
 

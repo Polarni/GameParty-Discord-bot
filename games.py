@@ -561,7 +561,7 @@ class GamesCog(commands.Cog):
             await interaction.response.send_message(t(lang, "leaderboard_empty"), ephemeral=True)
             return
 
-        top    = sorted(stats.items(), key=lambda x: x[1]["wins"], reverse=True)[:10]
+        top    = sorted(stats.items(), key=lambda x: (x[1]["wins"], -x[1]["games"]), reverse=True)[:10]
         medals = ["🥇", "🥈", "🥉"]
         lines  = []
         for i, (uid, data) in enumerate(top):

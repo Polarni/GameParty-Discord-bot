@@ -1,3 +1,7 @@
+[0.2.5] — 2026-05-31
+# Changed
+## Leadeboard of Rock, Paper, Scissors will sort by games with the most wins first, followed by those with the fewest plays.
+
 [0.2.4] — 2026-05-31
 # Fixed
 ## Score of Rock, Paper, Scissors no longer swaps.

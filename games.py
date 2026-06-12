@@ -20,6 +20,16 @@ _guess_ephs: dict[str, dict] = {}   # uid -> {"wh": Webhook, "id": int}
 log = logging.getLogger(__name__)
 
 _GUESS_POINTS  = [10, 7, 5, 3]   # rank 0=1st, 1=2nd, 2=3rd, 3=4th
+_GUESS_BANNED: set[int] = {6767, 67, 666, 616, 13, 1313, 1488, 8814, 88, 18, 1933, 1939, 4200, 1312, 911}  # numbers the daily draw will never pick, e.g. {1111, 1234}
+_GUESS_HINT_AFTER = 15           # attempts to unlock the daily hint (0 = disabled)
+_GUESS_HINT_TYPES = ("parity", "digits", "digitsum", "first_digit",
+                     "last_digit", "half", "div3")     # one is drawn per day
+_GUESS_NORMAL_CHANCE = 0.60      # chance of a plain day without a modifier
+_GUESS_MODIFIERS = (             # relative weights among modifiers on modifier days
+    ("wordle",  40),             # digits marked like Wordle instead of high/low
+    ("hotcold", 30),             # distance only (hot/cold), no direction
+    ("reverse", 10),             # high/low hints are swapped
+)                                # April 1st is always "pokerface" — no hints at all
 _RPS_DAILY_CAP = 10
 
 
@@ -27,6 +37,117 @@ def _pts_for_rank(rank: int) -> int:
     if rank < len(_GUESS_POINTS):
         return _GUESS_POINTS[rank]
     return 1 if rank < 10 else 0
+
+
+def _solver_key(item: tuple) -> tuple:
+    """Ranking: fewest attempts, then fastest solve (first attempt → correct
+    guess), then who solved earlier in the day."""
+    data = item[1]
+    return (data["attempts"], data.get("duration", 0.0), data["solved_at"])
+
+
+def _daily_hint(state: dict, attempts_made: int, lang: str) -> str | None:
+    """One hint of the day — drawn randomly at rollover (same for everyone),
+    unlocked once a player reaches _GUESS_HINT_AFTER attempts. Stays visible
+    until the player solves the number."""
+    number = state.get("number")
+    if not _GUESS_HINT_AFTER or not number or attempts_made < _GUESS_HINT_AFTER:
+        return None
+    if state.get("modifier") == "wordle":
+        return None   # Wordle feedback is hint enough
+    # Older state without a stored hint falls back to a number-derived choice,
+    # so everyone still sees the same hint.
+    hint_type = state.get("hint") or _GUESS_HINT_TYPES[number % len(_GUESS_HINT_TYPES)]
+    if hint_type == "parity":
+        return t(lang, "guess_hint_even" if number % 2 == 0 else "guess_hint_odd")
+    if hint_type == "digits":
+        return t(lang, "guess_hint_digits", digits=len(str(number)))
+    if hint_type == "first_digit":
+        return t(lang, "guess_hint_first_digit", digit=str(number)[0])
+    if hint_type == "last_digit":
+        return t(lang, "guess_hint_last_digit", digit=str(number)[-1])
+    if hint_type == "half":
+        return t(lang, "guess_hint_low_half" if number <= 5000 else "guess_hint_high_half")
+    if hint_type == "div3":
+        return t(lang, "guess_hint_div3_yes" if number % 3 == 0 else "guess_hint_div3_no")
+    return t(lang, "guess_hint_digitsum", sum=sum(int(d) for d in str(number)))
+
+
+def _hint_key(diff: int, low: bool) -> str:
+    """Graded hint by distance: >1000 far, 101–1000 mid, <=100 close."""
+    if diff > 1000:
+        return "guess_too_low" if low else "guess_too_high"
+    if diff > 100:
+        return "guess_low" if low else "guess_high"
+    return "guess_close_low" if low else "guess_close_high"
+
+
+def _draw_modifier(today: str) -> str | None:
+    if today.endswith("-04-01"):
+        return "pokerface"   # April Fools — the whole day, no draw
+    if random.random() < _GUESS_NORMAL_CHANCE:
+        return None
+    names   = [name for name, _ in _GUESS_MODIFIERS]
+    weights = [weight for _, weight in _GUESS_MODIFIERS]
+    return random.choices(names, weights=weights)[0]
+
+
+def _wordle_feedback(guess: int, number: int) -> str:
+    """Wordle-style riddle over 4 left-zero-padded digits: **bold** right
+    place, __underlined__ right digit elsewhere, plain not in the number
+    (duplicates handled)."""
+    g, n = f"{guess:04d}", f"{number:04d}"
+    marks     = [None] * 4   # None = plain, True = bold, False = underline
+    remaining = []
+    for i in range(4):
+        if g[i] == n[i]:
+            marks[i] = True
+        else:
+            remaining.append(n[i])
+    for i in range(4):
+        if marks[i] is None and g[i] in remaining:
+            marks[i] = False
+            remaining.remove(g[i])
+    out = []
+    for mark, digit in zip(marks, g):
+        if mark is True:
+            out.append(f"**{digit}**")
+        elif mark is False:
+            out.append(f"__{digit}__")
+        else:
+            out.append(digit)
+    return " ".join(out)
+
+
+def _wrong_status(state: dict, guess: int, number: int, attempt: int, lang: str) -> str:
+    """Status line for a wrong guess, honouring the daily modifier."""
+    mod  = state.get("modifier")
+    diff = abs(guess - number)
+    if mod == "wordle":
+        return t(lang, "guess_wordle_result", result=_wordle_feedback(guess, number), attempt=attempt)
+    if mod == "hotcold":
+        key = "guess_hot_burn" if diff <= 100 else ("guess_hot_warm" if diff <= 1000 else "guess_hot_cold")
+        return t(lang, key, attempt=attempt)
+    if mod == "pokerface":
+        return t(lang, "guess_pokerface", attempt=attempt)
+    low = guess < number
+    if mod == "reverse":
+        low = not low
+        if diff <= 100:
+            # Close guesses are "far far away" on the opposite day.
+            return t(lang, "guess_rev_close_low" if low else "guess_rev_close_high", attempt=attempt)
+    return t(lang, _hint_key(diff, low=low), attempt=attempt)
+
+
+def _fmt_duration(seconds: float) -> str:
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {s}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m}m"
 
 
 # ─────────────────────────────────────────────
@@ -311,9 +432,21 @@ def _build_guess_embed(uid: str, state: dict, lang: str, status: str | None = No
     else:
         user_line = t(lang, "guess_ongoing")
 
-    ranked = sorted(solvers.items(), key=lambda x: (x[1]["attempts"], x[1]["solved_at"]))
+    ranked = sorted(solvers.items(), key=_solver_key)
     medals = ["🥇", "🥈", "🥉"]
     parts  = [user_line]
+
+    if not solved:
+        # Modifiers stay hidden — discovering the day's twist is the puzzle.
+        # Only April Fools reveals itself (the 1–99 range has to be known).
+        if state.get("modifier") == "pokerface":
+            parts.append("")
+            parts.append(t(lang, "guess_mod_pokerface"))
+        hint = _daily_hint(state, attempts_made, lang)
+        if hint:
+            parts.append("")
+            parts.append(f"💡 {hint}")
+
     if ranked:
         parts.append("")
         parts.append(t(lang, "guess_standings"))
@@ -321,6 +454,7 @@ def _build_guess_embed(uid: str, state: dict, lang: str, status: str | None = No
             medal = medals[i] if i < 3 else f"{i + 1}."
             parts.append(
                 f"{medal} <@{s_uid}> — {data['attempts']} {t(lang, 'guess_attempts')}"
+                f" · {_fmt_duration(data.get('duration', 0.0))}"
             )
 
     return discord.Embed(
@@ -394,22 +528,24 @@ class GuessModal(discord.ui.Modal):
         current = attempts[uid]
         number  = state["number"]
 
+        now     = interaction.created_at.timestamp()
+        started = state.setdefault("started", {})
+        if uid not in started:
+            started[uid] = now
+
         if guess == number:
             state.setdefault("solvers", {})[uid] = {
                 "attempts": current,
-                "solved_at": interaction.created_at.timestamp(),
+                "solved_at": now,
+                "duration": now - started[uid],
             }
             _save_guess_state(state)
             status = t(lang, "guess_correct", attempts=current)
             solved = True
             log.info(f"Guess solved by {interaction.user} in {current} attempts")
-        elif guess < number:
-            _save_guess_state(state)
-            status = t(lang, "guess_too_low", attempt=current)
-            solved = False
         else:
             _save_guess_state(state)
-            status = t(lang, "guess_too_high", attempt=current)
+            status = _wrong_status(state, guess, number, current, lang)
             solved = False
 
         if not solved:
@@ -810,9 +946,26 @@ class GamesCog(commands.Cog):
             if state.get("solvers"):
                 await self._award_guess_points(state)
 
+        modifier = _draw_modifier(today)
+        lo, hi = 1, 9999
+        if modifier == "wordle":
+            lo = 1000          # always 4 digits
+        elif modifier == "pokerface":
+            hi = 99            # tiny range to balance the missing hints
+        number = random.randint(lo, hi)
+        while number in _GUESS_BANNED:
+            number = random.randint(lo, hi)
+        new_state = {"date": today, "number": number, "attempts": {}, "started": {}, "solvers": {},
+                     "hint": random.choice(_GUESS_HINT_TYPES), "modifier": modifier}
+        _save_guess_state(new_state)
+
+        start_line = t("en", "guess_start")
+        if modifier == "pokerface":
+            start_line += "\n" + t("en", "guess_mod_pokerface")
+
         if results_embed:
             # Yesterday's results and the new-game announcement in one embed.
-            results_embed.description += f"\n\n{t('en', 'guess_start')}"
+            results_embed.description += f"\n\n{start_line}"
             embeds.append(results_embed)
 
         # Season reset whenever a month boundary was crossed — also catches
@@ -821,19 +974,15 @@ class GamesCog(commands.Cog):
             reset_embed = await self._auto_season_reset(ch)
             embeds.append(reset_embed)
 
-        number    = random.randint(1, 9999)
-        new_state = {"date": today, "number": number, "attempts": {}, "solvers": {}}
-        _save_guess_state(new_state)
-
         if ch:
             if not results_embed:
                 embeds.append(discord.Embed(
                     title=t("en", "guess_title"),
-                    description=t("en", "guess_start"),
+                    description=start_line,
                     color=discord.Color.blurple(),
                 ))
             await ch.send(embeds=embeds)
-        log.info(f"Guess game started: number={number}, date={today}")
+        log.info(f"Guess game started: number={number}, date={today}, modifier={modifier}")
 
     async def _auto_season_reset(self, ch: discord.TextChannel | None) -> discord.Embed:
         guild = getattr(ch, "guild", None)
@@ -897,10 +1046,8 @@ class GamesCog(commands.Cog):
         guild  = getattr(ch, "guild", None)
         medals = ["🥇", "🥈", "🥉"]
 
-        ranked = sorted(
-            solvers.items(),
-            key=lambda x: (x[1]["attempts"], x[1]["solved_at"])
-        )
+        ranked = sorted(solvers.items(), key=_solver_key)
+        mult   = 2 if state.get("modifier") == "pokerface" else 1
 
         if ranked:
             lines = []
@@ -908,12 +1055,10 @@ class GamesCog(commands.Cog):
                 member = guild.get_member(int(uid)) if guild else None
                 name   = member.display_name if member else f"<@{uid}>"
                 medal  = medals[i] if i < 3 else f"{i + 1}."
-                pts    = _pts_for_rank(i)
-                solved = datetime.datetime.fromtimestamp(
-                    data["solved_at"], tz=datetime.timezone.utc
-                ).strftime("%H:%M UTC")
+                pts    = _pts_for_rank(i) * mult
                 lines.append(
-                    f"{medal} **{name}** — {data['attempts']} {t('en', 'guess_attempts')} +{pts} {t('en', 'guess_pts_label')}"
+                    f"{medal} **{name}** — {data['attempts']} {t('en', 'guess_attempts')}"
+                    f" · {_fmt_duration(data.get('duration', 0.0))} +{pts} {t('en', 'guess_pts_label')}"
                 )
             desc = "\n".join(lines)
         else:
@@ -927,15 +1072,13 @@ class GamesCog(commands.Cog):
 
     async def _award_guess_points(self, state: dict) -> None:
         solvers = state.get("solvers", {})
-        ranked  = sorted(
-            solvers.items(),
-            key=lambda x: (x[1]["attempts"], x[1]["solved_at"])
-        )
+        ranked  = sorted(solvers.items(), key=_solver_key)
         awarded = []
+        mult    = 2 if state.get("modifier") == "pokerface" else 1
         async with _users_lock:
             users = _load_users()
             for i, (uid, _) in enumerate(ranked):
-                pts   = _pts_for_rank(i)
+                pts   = _pts_for_rank(i) * mult
                 entry = users.setdefault(uid, {})
                 guess = entry.setdefault("guess", {})
                 guess["season_pts"]   = guess.get("season_pts",   0) + pts
@@ -1095,9 +1238,12 @@ class GamesCog(commands.Cog):
             if state.get("date") != _today_utc() or not state.get("number"):
                 await self._rollover_guess()
             else:
+                desc = t("en", "guess_start")
+                if state.get("modifier") == "pokerface":
+                    desc += "\n" + t("en", "guess_mod_pokerface")
                 await target.send(embed=discord.Embed(
                     title=t("en", "guess_title"),
-                    description=t("en", "guess_start"),
+                    description=desc,
                     color=discord.Color.blurple(),
                 ))
         except Exception as e:

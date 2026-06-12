@@ -220,7 +220,7 @@ class BdayCog(commands.Cog):
 
     @tasks.loop(hours=1)
     async def check_birthdays(self):
-        now = datetime.datetime.now()
+        now = datetime.datetime.now(datetime.timezone.utc)
         if now.hour != 0:
             return
 

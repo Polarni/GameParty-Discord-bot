@@ -1,3 +1,9 @@
+[0.3.3] — 2026-06-12
+# Changed
+## Guess have now more hints and daily hint is same for everyone
+## Guess have modifications which are little puzzling, but little rare
+## Birthdays will wrote when 00:00 UTC
+
 [0.3.2] — 2026-06-10
 # Changed
 ## Better logging

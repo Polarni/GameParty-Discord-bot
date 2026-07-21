@@ -462,9 +462,12 @@ def _build_guess_embed(uid: str, state: dict, lang: str, status: str | None = No
         parts.append(t(lang, "guess_standings"))
         for i, (s_uid, data) in enumerate(ranked[:5]):
             medal = medals[i] if i < 3 else f" {i + 1}."
+            # Convert timestamp to a 24-hour string (e.g., 14:30 UTC)
+            solved_time = datetime.datetime.fromtimestamp(data['solved_at'], datetime.timezone.utc).strftime('%H:%M UTC')
+            
             parts.append(
                 f"{medal} <@{s_uid}> — {data['attempts']} {t(lang, 'guess_attempts')}"
-                f" · {_fmt_duration(data.get('duration', 0.0))}"
+                f" · {_fmt_duration(data.get('duration', 0.0))} · {solved_time}"
             )
         for p_uid, n in in_progress[:5]:
             parts.append(f"⏳ <@{p_uid}> — {n} {t(lang, 'guess_attempts')}")
@@ -1069,9 +1072,12 @@ class GamesCog(commands.Cog):
                 name   = member.display_name if member else f"<@{uid}>"
                 medal  = medals[i] if i < 3 else f"{i + 1}."
                 pts    = _pts_for_rank(i) * mult
+                # Convert timestamp to a 24-hour string
+                solved_time = datetime.datetime.fromtimestamp(data['solved_at'], datetime.timezone.utc).strftime('%H:%M UTC')
+                
                 lines.append(
                     f"{medal} **{name}** — {data['attempts']} {t('en', 'guess_attempts')}"
-                    f" · {_fmt_duration(data.get('duration', 0.0))} · +{pts} {t('en', 'guess_pts_label')}"
+                    f" · {_fmt_duration(data.get('duration', 0.0))} · {solved_time} · +{pts} {t('en', 'guess_pts_label')}"
                 )
             desc = "\n".join(lines)
         else:

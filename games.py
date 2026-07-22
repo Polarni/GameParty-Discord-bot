@@ -457,7 +457,7 @@ def _build_guess_embed(uid: str, state: dict, lang: str, status: str | None = No
         key=lambda x: x[1], reverse=True,
     )
 
-  if ranked or in_progress:
+    if ranked or in_progress:
         parts.append("")
         parts.append(t(lang, "guess_standings"))
         for i, (s_uid, data) in enumerate(ranked[:5]):
@@ -1065,7 +1065,7 @@ class GamesCog(commands.Cog):
         ranked = sorted(solvers.items(), key=_solver_key)
         mult   = 2 if state.get("modifier") == "pokerface" else 1
 
-    if ranked:
+        if ranked:
             lines = []
             for i, (uid, data) in enumerate(ranked):
                 member = guild.get_member(int(uid)) if guild else None
